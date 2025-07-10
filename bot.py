@@ -102,6 +102,7 @@ async def leave(ctx):
 async def start(ctx):
     state = load_state()
     players = state["players"]
+    
     if len(players) < 2:
         await ctx.send("Need at least 2 players to start.")
         return
@@ -117,9 +118,13 @@ async def start(ctx):
     save_state(state)
 
     for pid in players:
-        user = await bot.fetch_user(int(pid))
-        hand = hands[pid]
-        await user.send(f"🎴 Your cards: {', '.join(hand)}")
+        try:
+            user = await bot.fetch_user(int(pid))
+            hand = hands[pid]
+            await user.send(f"🎴 Your cards: {', '.join(hand)}")
+        except Exception as e:
+            print(f"❌ Failed to DM player {pid}: {e}")
+            await ctx.send(f"❌ Couldn't DM <@{pid}>. Make sure their DMs are enabled!")
 
     await ctx.send("🃏 Cards dealt! Check your DMs.\nFirst turn: <@{}>".format(players[0]))
 
