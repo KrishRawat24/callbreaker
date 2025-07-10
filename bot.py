@@ -12,12 +12,24 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+# ---- Dynamic Prefix ----
+PREFIX_FILE = "prefix.json"
 
-# File to persist game data between sessions
+def load_prefix():
+    if os.path.exists(PREFIX_FILE):
+        with open(PREFIX_FILE, "r") as f:
+            return json.load(f).get("prefix", "!")
+    return "!"
+
+def save_prefix(new_prefix):
+    with open(PREFIX_FILE, "w") as f:
+        json.dump({"prefix": new_prefix}, f)
+
+bot = commands.Bot(command_prefix=lambda bot, msg: load_prefix(), intents=intents)
+
+# ---- Game State File ----
 GAME_STATE_FILE = "game_state.json"
 
-# Load or initialize game state
 def load_state():
     if os.path.exists(GAME_STATE_FILE):
         with open(GAME_STATE_FILE, "r") as f:
@@ -35,12 +47,10 @@ def save_state(state):
     with open(GAME_STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-# Generate full deck
 suits = ["♠", "♥", "♦", "♣"]
 ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
 deck = [f"{rank}{suit}" for suit in suits for rank in ranks]
 
-# Score rank helper
 def card_value(card):
     rank = card[:-1]
     order = {str(n): n for n in range(2, 11)}
@@ -51,6 +61,11 @@ def card_value(card):
 async def on_ready():
     print(f"🤖 Logged in as {bot.user}")
     await bot.tree.sync()
+
+@bot.command()
+async def changeprefix(ctx, new_prefix):
+    save_prefix(new_prefix)
+    await ctx.send(f"✅ Command prefix changed to `{new_prefix}`. Use `{new_prefix}helpme` from now.")
 
 @bot.command()
 async def join(ctx):
@@ -70,39 +85,23 @@ async def leave(ctx):
     user_id = str(ctx.author.id)
 
     if user_id not in state["players"]:
-        await ctx.send(f"{ctx.author.display_name}, you're not in the game.")
+        await ctx.send("You're not in the game.")
         return
 
     state["players"].remove(user_id)
     state["scores"].pop(user_id, None)
     state["hands"].pop(user_id, None)
 
-    # If it was this player's turn, rotate turn
     if state["current_turn"] == user_id and state["players"]:
-        current_idx = 0
-        state["current_turn"] = state["players"][current_idx]
+        state["current_turn"] = state["players"][0]
 
     save_state(state)
-
-    await ctx.send(f"👋 {ctx.author.display_name} has left the game.")
-
-    if not state["players"]:
-        reset_state = {
-            "players": [],
-            "scores": {},
-            "hands": {},
-            "current_turn": "",
-            "cards_played": [],
-            "round": 1
-        }
-        save_state(reset_state)
-        await ctx.send("Game has been reset since all players left.")
+    await ctx.send(f"{ctx.author.display_name} left the game.")
 
 @bot.command()
 async def start(ctx):
     state = load_state()
     players = state["players"]
-    
     if len(players) < 2:
         await ctx.send("Need at least 2 players to start.")
         return
@@ -120,13 +119,11 @@ async def start(ctx):
     for pid in players:
         try:
             user = await bot.fetch_user(int(pid))
-            hand = hands[pid]
-            await user.send(f"🎴 Your cards: {', '.join(hand)}")
+            await user.send(f"🎴 Your cards: {', '.join(hands[pid])}")
         except Exception as e:
-            print(f"❌ Failed to DM player {pid}: {e}")
-            await ctx.send(f"❌ Couldn't DM <@{pid}>. Make sure their DMs are enabled!")
+            await ctx.send(f"⚠️ Failed to DM <@{pid}>. Make sure their DMs are enabled!")
 
-    await ctx.send("🃏 Cards dealt! Check your DMs.\nFirst turn: <@{}>".format(players[0]))
+    await ctx.send(f"🃏 Cards dealt! First turn: <@{players[0]}>")
 
 @bot.command()
 async def play(ctx, *, card_input):
@@ -140,7 +137,6 @@ async def play(ctx, *, card_input):
     hand = state["hands"].get(user_id, [])
     card_input = card_input.lower().strip()
 
-    # --- Normalize text like "10 of hearts" to "10♥"
     rank_map = {
         "2": "2", "3": "3", "4": "4", "5": "5", "6": "6",
         "7": "7", "8": "8", "9": "9", "10": "10",
@@ -154,18 +150,16 @@ async def play(ctx, *, card_input):
         "clubs": "♣", "club": "♣"
     }
 
-    # Parse input like "10 heart" or "king of spades"
     tokens = card_input.replace("of", "").split()
     if len(tokens) != 2:
-        await ctx.send("❌ Invalid card format. Try `10 heart` or `king spade`.")
+        await ctx.send("❌ Use format like `10 hearts`, `queen spades`, or `a club`.")
         return
 
-    rank_raw, suit_raw = tokens
-    rank = rank_map.get(rank_raw)
-    suit = suit_map.get(suit_raw)
+    rank = rank_map.get(tokens[0])
+    suit = suit_map.get(tokens[1])
 
     if not rank or not suit:
-        await ctx.send("❌ Invalid card. Example: `10 heart`, `king spade`, `A club`")
+        await ctx.send("❌ Invalid rank or suit.")
         return
 
     card = f"{rank}{suit}"
@@ -174,7 +168,6 @@ async def play(ctx, *, card_input):
         await ctx.send("❌ You don't have that card.")
         return
 
-    # --- Enforce rules
     if state["cards_played"]:
         lead_suit = state["cards_played"][0]["card"][-1]
         lead_value = card_value(state["cards_played"][0]["card"])
@@ -189,7 +182,6 @@ async def play(ctx, *, card_input):
                 await ctx.send("⚠️ You must throw a spade if you have no higher card.")
                 return
 
-    # --- Proceed with card play
     hand.remove(card)
     state["hands"][user_id] = hand
     state["cards_played"].append({"player": user_id, "card": card})
@@ -205,7 +197,6 @@ async def play(ctx, *, card_input):
 
     await ctx.send(f"🔔 Next turn: <@{players[next_idx]}>")
 
-
 @bot.command()
 async def score(ctx):
     state = load_state()
@@ -215,57 +206,43 @@ async def score(ctx):
         lines.append(f"{user.display_name}: {score}")
     await ctx.send("\n".join(lines))
 
-@bot.command(name='rules')
+@bot.command()
 async def rules(ctx):
-    rules_text = """
+    await ctx.send(f"""
 🃏 **Call Breaker Game Rules**
-
-1. **Objective**: Win the most rounds by playing the highest card.
-2. **Turn Rules**:
-   - You must play a higher card of the same suit if you have one.
-   - If you don’t have a higher card of the same suit:
-     - You **must** play a ♠️ Spade if you have it.
-     - If you have no spade, play any lower card.
-3. **Spades are trump**: Spades beat other suits.
-4. **Cards are private**: Hands are sent via DM to each player.
-5. **Gameplay**:
-   - `!join` – Join the game
-   - `!start` – Start the game
-   - `!play <card>` – Play a card
-   - `!score` – Show the scoreboard
-   - `!reset` – Reset the match
-   - `!leave` – Leave the match
-   - `!rules` – Show rules again
-
-🎯 Play smart, aim high, and use your spades wisely!
-"""
-    await ctx.send(rules_text)
+1. Win rounds by playing the highest card.
+2. Must play higher card of same suit if possible.
+3. If not, throw a ♠️ if you have one.
+4. If not, play any lower card.
+5. Spades beat all other suits.
+6. Use `join`, `start`, `play <card>`, `score`, `reset`, `leave`, `rules`, `changeprefix <symbol>`.
+""")
 
 @bot.command()
 async def reset(ctx):
-    state = {
+    save_state({
         "players": [],
         "scores": {},
         "hands": {},
         "current_turn": "",
         "cards_played": [],
         "round": 1
-    }
-    save_state(state)
+    })
     await ctx.send("🔄 Game reset.")
 
 @bot.command()
 async def helpme(ctx):
-    await ctx.send("""
+    prefix = load_prefix()
+    await ctx.send(f"""
 🧠 **Call Breaker Bot Commands**:
-`!join` – Join the game  
-`!start` – Deal cards and begin  
-`!play <card>` – Play your card (e.g. !play 10♥)  
-`!score` – Show scoreboard  
-`!reset` – Reset the game  
-`!rules` – Game instructions  
-`!leave` – Leave the game
-Cards are shown privately in your DM. On your turn, play the highest card if possible.
+`{prefix}join` – Join the game  
+`{prefix}start` – Start game and deal cards  
+`{prefix}play <card>` – Play your card (e.g. `10 heart`, `ace spade`)  
+`{prefix}score` – Show scoreboard  
+`{prefix}reset` – Reset the game  
+`{prefix}rules` – Game rules  
+`{prefix}leave` – Leave the match  
+`{prefix}changeprefix <new>` – Change bot prefix
 """)
 
 bot.run(TOKEN)
