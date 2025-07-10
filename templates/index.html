@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Call Breaker Dashboard</title>
+    <meta http-equiv="refresh" content="5">
+    <style>
+        body { font-family: Arial; text-align: center; }
+        .card { display: inline-block; margin: 10px; padding: 10px; border: 1px solid #aaa; }
+    </style>
+</head>
+<body>
+    <h1>Call Breaker Dashboard</h1>
+    <h2>Last Played Card: {{ state.get('last_card', 'None') }}</h2>
+    <h2>Current Turn: {{ state.get('turn', 'Waiting...') }}</h2>
+    <h3>Players:</h3>
+    <ul>
+        {% for player in state.get('players', []) %}
+        <li>{{ player }} - Cards left: {{ state.hands[player]|length }}</li>
+        {% endfor %}
+    </ul>
+</body>
+</html>
