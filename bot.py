@@ -129,7 +129,7 @@ async def start(ctx):
     await ctx.send("🃏 Cards dealt! Check your DMs.\nFirst turn: <@{}>".format(players[0]))
 
 @bot.command()
-async def play(ctx, *, card):
+async def play(ctx, *, card_input):
     state = load_state()
     user_id = str(ctx.author.id)
 
@@ -138,12 +138,43 @@ async def play(ctx, *, card):
         return
 
     hand = state["hands"].get(user_id, [])
-    card = card.strip()
+    card_input = card_input.lower().strip()
+
+    # --- Normalize text like "10 of hearts" to "10♥"
+    rank_map = {
+        "2": "2", "3": "3", "4": "4", "5": "5", "6": "6",
+        "7": "7", "8": "8", "9": "9", "10": "10",
+        "j": "J", "jack": "J", "q": "Q", "queen": "Q",
+        "k": "K", "king": "K", "a": "A", "ace": "A"
+    }
+    suit_map = {
+        "hearts": "♥", "heart": "♥",
+        "spades": "♠", "spade": "♠",
+        "diamonds": "♦", "diamond": "♦",
+        "clubs": "♣", "club": "♣"
+    }
+
+    # Parse input like "10 heart" or "king of spades"
+    tokens = card_input.replace("of", "").split()
+    if len(tokens) != 2:
+        await ctx.send("❌ Invalid card format. Try `10 heart` or `king spade`.")
+        return
+
+    rank_raw, suit_raw = tokens
+    rank = rank_map.get(rank_raw)
+    suit = suit_map.get(suit_raw)
+
+    if not rank or not suit:
+        await ctx.send("❌ Invalid card. Example: `10 heart`, `king spade`, `A club`")
+        return
+
+    card = f"{rank}{suit}"
 
     if card not in hand:
         await ctx.send("❌ You don't have that card.")
         return
 
+    # --- Enforce rules
     if state["cards_played"]:
         lead_suit = state["cards_played"][0]["card"][-1]
         lead_value = card_value(state["cards_played"][0]["card"])
@@ -158,6 +189,7 @@ async def play(ctx, *, card):
                 await ctx.send("⚠️ You must throw a spade if you have no higher card.")
                 return
 
+    # --- Proceed with card play
     hand.remove(card)
     state["hands"][user_id] = hand
     state["cards_played"].append({"player": user_id, "card": card})
@@ -172,6 +204,7 @@ async def play(ctx, *, card):
     save_state(state)
 
     await ctx.send(f"🔔 Next turn: <@{players[next_idx]}>")
+
 
 @bot.command()
 async def score(ctx):
