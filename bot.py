@@ -1,248 +1,233 @@
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
+from flask import Flask
+from threading import Thread
 import os
+from dotenv import load_dotenv
 import random
-import json
+import asyncio
+from html2image import Html2Image
+from typing import Any
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
+# Flask app
+app = Flask(__name__)
+@app.route('/')
+def index():
+    return "Call Breaker Bot is running!"
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
+
+# Game state
+players = []
+player_hands = {}
+player_bids = {}
+player_tricks = {}
+current_turn_index = 0
+current_suit = None
+current_round = []
+all_throws = {}
+game_in_progress = False
+command_prefix_str = "!"
+
+# Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-
-# ---- Dynamic Prefix ----
-PREFIX_FILE = "prefix.json"
-
-def load_prefix():
-    if os.path.exists(PREFIX_FILE):
-        with open(PREFIX_FILE, "r") as f:
-            return json.load(f).get("prefix", "!")
-    return "!"
-
-def save_prefix(new_prefix):
-    with open(PREFIX_FILE, "w") as f:
-        json.dump({"prefix": new_prefix}, f)
-
-bot = commands.Bot(command_prefix=lambda bot, msg: load_prefix(), intents=intents)
-
-# ---- Game State File ----
-GAME_STATE_FILE = "game_state.json"
-
-def load_state():
-    if os.path.exists(GAME_STATE_FILE):
-        with open(GAME_STATE_FILE, "r") as f:
-            return json.load(f)
-    return {
-        "players": [],
-        "scores": {},
-        "hands": {},
-        "current_turn": "",
-        "cards_played": [],
-        "round": 1
-    }
-
-def save_state(state):
-    with open(GAME_STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
-
-suits = ["♠", "♥", "♦", "♣"]
-ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
-deck = [f"{rank}{suit}" for suit in suits for rank in ranks]
-
-def card_value(card):
-    rank = card[:-1]
-    order = {str(n): n for n in range(2, 11)}
-    order.update({"J": 11, "Q": 12, "K": 13, "A": 14})
-    return order.get(rank, 0)
-
-@bot.event
-async def on_ready():
-    print(f"🤖 Logged in as {bot.user}")
-    await bot.tree.sync()
+bot = commands.Bot(command_prefix=lambda bot, msg: command_prefix_str, intents=intents)
 
 @bot.command()
-async def changeprefix(ctx, new_prefix):
-    save_prefix(new_prefix)
-    await ctx.send(f"✅ Command prefix changed to `{new_prefix}`. Use `{new_prefix}helpme` from now.")
+async def setprefix(ctx: commands.Context, new_prefix: str):
+    global command_prefix_str
+    command_prefix_str = new_prefix
+    await ctx.send(f"✅ Prefix changed to `{command_prefix_str}`")
 
 @bot.command()
-async def join(ctx):
-    state = load_state()
-    user_id = str(ctx.author.id)
-    if user_id not in state["players"]:
-        state["players"].append(user_id)
-        state["scores"][user_id] = 0
-        save_state(state)
-        await ctx.send(f"{ctx.author.display_name} joined the game!")
-    else:
-        await ctx.send("You're already in the game.")
-
-@bot.command()
-async def leave(ctx):
-    state = load_state()
-    user_id = str(ctx.author.id)
-
-    if user_id not in state["players"]:
-        await ctx.send("You're not in the game.")
+async def join(ctx: commands.Context):
+    if game_in_progress:
+        await ctx.send("🚫 A game is already in progress.")
         return
-
-    state["players"].remove(user_id)
-    state["scores"].pop(user_id, None)
-    state["hands"].pop(user_id, None)
-
-    if state["current_turn"] == user_id and state["players"]:
-        state["current_turn"] = state["players"][0]
-
-    save_state(state)
-    await ctx.send(f"{ctx.author.display_name} left the game.")
+    if ctx.author not in players:
+        players.append(ctx.author)
+        await ctx.send(f"✅ {ctx.author.mention} joined the game!")
 
 @bot.command()
-async def start(ctx):
-    state = load_state()
-    players = state["players"]
+async def start(ctx: commands.Context):
+    global game_in_progress, current_turn_index, player_bids, player_tricks, player_hands, all_throws
+
     if len(players) < 2:
         await ctx.send("Need at least 2 players to start.")
         return
+    game_in_progress = True
+    deck = [f"{rank}{suit}" for rank in list("23456789TJQKA") for suit in ['♠', '♥', '♦', '♣']]
+    random.shuffle(deck)
 
-    cards = deck.copy()
-    random.shuffle(cards)
+    cards_per_player = len(deck) // len(players)
+    leftover = len(deck) % len(players)
+    for i, player in enumerate(players):
+        hand = deck[i * cards_per_player: (i + 1) * cards_per_player]
+        player_hands[player] = hand
+        player_tricks[player] = 0
+        all_throws[player] = []
 
-    hand_size = len(cards) // len(players)
-    hands = {pid: cards[i * hand_size:(i + 1) * hand_size] for i, pid in enumerate(players)}
-    state["hands"] = hands
-    state["current_turn"] = players[0]
-    state["cards_played"] = []
-    save_state(state)
+    if leftover:
+        left_cards = deck[-leftover:]
+        await ctx.send(f"🃏 Leftover cards: {', '.join(left_cards)}")
 
-    for pid in players:
-        try:
-            user = await bot.fetch_user(int(pid))
-            await user.send(f"🎴 Your cards: {', '.join(hands[pid])}")
-        except Exception as e:
-            await ctx.send(f"⚠️ Failed to DM <@{pid}>. Make sure their DMs are enabled!")
-
-    await ctx.send(f"🃏 Cards dealt! First turn: <@{players[0]}>")
+    await ctx.send("🎯 Game started! Everyone please enter your bid using `!bid <number>`")
+    current_turn_index = random.randint(0, len(players) - 1)
 
 @bot.command()
-async def play(ctx, *, card_input):
-    state = load_state()
-    user_id = str(ctx.author.id)
+async def bid(ctx: commands.Context, number: int):
+    if ctx.author not in players:
+        await ctx.send("You're not in the game.")
+        return
+    if ctx.author in player_bids:
+        await ctx.send("You've already placed a bid.")
+        return
+    player_bids[ctx.author] = number
+    await ctx.send(f"{ctx.author.mention} placed a bid of {number}")
 
-    if user_id != state["current_turn"]:
-        await ctx.send("❌ It's not your turn.")
+    if len(player_bids) == len(players):
+        await ctx.send("🃏 All bids are in! Let's begin.")
+        await bot.get_channel(ctx.channel.id).send(f"🎮 {players[current_turn_index].mention}, it's your turn to throw!")
+
+@bot.command()
+async def throw(ctx: commands.Context, card: str):
+    global current_turn_index, current_suit
+
+    if ctx.author != players[current_turn_index]:
+        await ctx.send("🚫 It's not your turn.")
+        return
+    if card not in player_hands[ctx.author]:
+        await ctx.send("🚫 You don't have that card.")
         return
 
-    hand = state["hands"].get(user_id, [])
-    card_input = card_input.lower().strip()
-
-    rank_map = {
-        "2": "2", "3": "3", "4": "4", "5": "5", "6": "6",
-        "7": "7", "8": "8", "9": "9", "10": "10",
-        "j": "J", "jack": "J", "q": "Q", "queen": "Q",
-        "k": "K", "king": "K", "a": "A", "ace": "A"
-    }
-    suit_map = {
-        "hearts": "♥", "heart": "♥",
-        "spades": "♠", "spade": "♠",
-        "diamonds": "♦", "diamond": "♦",
-        "clubs": "♣", "club": "♣"
-    }
-
-    tokens = card_input.replace("of", "").split()
-    if len(tokens) != 2:
-        await ctx.send("❌ Use format like `10 hearts`, `queen spades`, or `a club`.")
-        return
-
-    rank = rank_map.get(tokens[0])
-    suit = suit_map.get(tokens[1])
-
-    if not rank or not suit:
-        await ctx.send("❌ Invalid rank or suit.")
-        return
-
-    card = f"{rank}{suit}"
-
-    if card not in hand:
-        await ctx.send("❌ You don't have that card.")
-        return
-
-    if state["cards_played"]:
-        lead_suit = state["cards_played"][0]["card"][-1]
-        lead_value = card_value(state["cards_played"][0]["card"])
-        same_suit_higher = [c for c in hand if c[-1] == lead_suit and card_value(c) > lead_value]
-
-        if same_suit_higher and card not in same_suit_higher:
-            await ctx.send("⚠️ You must play a higher card of the same suit.")
-            return
-        elif not same_suit_higher:
-            spades = [c for c in hand if "♠" in c]
-            if spades and "♠" not in card:
-                await ctx.send("⚠️ You must throw a spade if you have no higher card.")
+    suit = card[-1]
+    if not current_round:
+        current_suit = suit
+    else:
+        same_suit = [c for c in player_hands[ctx.author] if c[-1] == current_suit]
+        spades = [c for c in player_hands[ctx.author] if c[-1] == '♠']
+        if suit != current_suit:
+            if same_suit:
+                await ctx.send("🚫 You must throw the same suit if you have one.")
+                return
+            elif suit != '♠' and spades:
+                await ctx.send("🚫 You must throw a spade if you don’t have the suit.")
                 return
 
-    hand.remove(card)
-    state["hands"][user_id] = hand
-    state["cards_played"].append({"player": user_id, "card": card})
-    save_state(state)
+    current_round.append((ctx.author, card))
+    player_hands[ctx.author].remove(card)
+    all_throws[ctx.author].append(card)
 
-    await ctx.send(f"🃏 {ctx.author.display_name} played: {card}")
+    if len(current_round) < len(players):
+        current_turn_index = (current_turn_index + 1) % len(players)
+        await ctx.send(f"✅ {ctx.author.mention} threw {card}. Next: {players[current_turn_index].mention}")
+    else:
+        suit_cards = [(p, c) for p, c in current_round if c[-1] == current_suit]
+        if not suit_cards:
+            suit_cards = [(p, c) for p, c in current_round if c[-1] == '♠']
+        winner = max(suit_cards, key=lambda x: "23456789TJQKA".index(x[1][0]))
+        player_tricks[winner[0]] += 1
+        current_turn_index = players.index(winner[0])
+        await ctx.send(f"🏆 {winner[0].mention} won the round with {winner[1]}!")
 
-    players = state["players"]
-    idx = players.index(user_id)
-    next_idx = (idx + 1) % len(players)
-    state["current_turn"] = players[next_idx]
-    save_state(state)
+        current_round.clear()
+        current_suit = None
 
-    await ctx.send(f"🔔 Next turn: <@{players[next_idx]}>")
+        if all(len(h) == 0 for h in player_hands.values()):
+            await end_game(ctx)
+        else:
+            await ctx.send(f"🎮 {players[current_turn_index].mention}, it's your turn to throw!")
 
-@bot.command()
-async def score(ctx):
-    state = load_state()
-    lines = ["📊 **Scores:**"]
-    for pid, score in state["scores"].items():
-        user = await bot.fetch_user(int(pid))
-        lines.append(f"{user.display_name}: {score}")
-    await ctx.send("\n".join(lines))
+    await render_game_image(ctx)
 
-@bot.command()
-async def rules(ctx):
-    await ctx.send(f"""
-🃏 **Call Breaker Game Rules**
-1. Win rounds by playing the highest card.
-2. Must play higher card of same suit if possible.
-3. If not, throw a ♠️ if you have one.
-4. If not, play any lower card.
-5. Spades beat all other suits.
-6. Use `join`, `start`, `play <card>`, `score`, `reset`, `leave`, `rules`, `changeprefix <symbol>`.
-""")
-
-@bot.command()
-async def reset(ctx):
-    save_state({
-        "players": [],
-        "scores": {},
-        "hands": {},
-        "current_turn": "",
-        "cards_played": [],
-        "round": 1
-    })
-    await ctx.send("🔄 Game reset.")
-
-@bot.command()
-async def helpme(ctx):
-    prefix = load_prefix()
+# --- Add a help command ---
+@bot.command(name="helpme")
+async def helpme(ctx: commands.Context):
     await ctx.send(f"""
 🧠 **Call Breaker Bot Commands**:
-`{prefix}join` – Join the game  
-`{prefix}start` – Start game and deal cards  
-`{prefix}play <card>` – Play your card (e.g. `10 heart`, `ace spade`)  
-`{prefix}score` – Show scoreboard  
-`{prefix}reset` – Reset the game  
-`{prefix}rules` – Game rules  
-`{prefix}leave` – Leave the match  
-`{prefix}changeprefix <new>` – Change bot prefix
+`!setprefix <new_prefix>` – Change the command prefix
+`!join` – Join the game
+`!start` – Start the game and deal cards
+`!bid <number>` – Place your bid for the round
+`!throw <card>` – Play a card (e.g. `10♠`, `Q♥`)
 """)
 
+# --- Add error handlers ---
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❗ Missing argument: `{error.param.name}`. Use `!helpme` for usage.")
+    elif isinstance(error, commands.CommandNotFound):
+        await ctx.send("❓ Unknown command. Use `!helpme` to see available commands.")
+    else:
+        await ctx.send(f"⚠️ An error occurred: {str(error)}")
+
+async def end_game(ctx: commands.Context):
+    global game_in_progress
+    results = []
+    for p in players:
+        bid = player_bids.get(p, 0)
+        tricks = player_tricks.get(p, 0)
+        win = "✅" if bid == tricks else "❌"
+        results.append(f"{p.name}: Bid {bid}, Got {tricks} → {win}")
+    await ctx.send("🎲 Game Over!\n" + "\n".join(results))
+    reset_game()
+
+def reset_game():
+    global players, player_hands, player_bids, player_tricks, current_turn_index, current_suit, current_round, game_in_progress, all_throws
+    players.clear()
+    player_hands.clear()
+    player_bids.clear()
+    player_tricks.clear()
+    current_round.clear()
+    all_throws.clear()
+    current_suit = None
+    current_turn_index = 0
+    game_in_progress = False
+
+async def render_game_image(ctx: commands.Context):
+    hti = Html2Image()
+    rows = ""
+    for player in players:
+        cards_html = ''.join(f'<span class="card">{c}</span>' for c in all_throws[player])
+        rows += f'<div class="player"><strong>{player.name}</strong>: {cards_html}</div>'
+    html = f""" <html>
+<head>
+  <style>
+    body {{
+      font-family: sans-serif;
+      background: white;
+      padding: 20px;
+    }}
+    .player {{
+      margin-bottom: 10px;
+      font-size: 18px;
+    }}
+    .card {{
+      display: inline-block;
+      margin-right: 8px;
+      padding: 4px 6px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 20px;
+      background: #f9f9f9;
+    }}
+  </style>
+</head>
+<body>
+  {rows}
+</body>
+</html> """
+    with open("table.html", "w") as f:
+        f.write(html)
+    hti.screenshot(html_file="table.html", save_as="game_table.png", size=(800, 400))
+    await ctx.send(file=discord.File("game_table.png"))
+
+# Run Flask + Bot
+Thread(target=run_flask).start()
 bot.run(TOKEN)
