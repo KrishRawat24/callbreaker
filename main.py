@@ -1,7 +1,18 @@
 import threading
-import dashboard
-import bot
+import subprocess
+import os
 
-if __name__ == '__main__':
-    threading.Thread(target=lambda: dashboard.app.run(debug=True, port=8080)).start()
-    bot.bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+def run_dashboard():
+    subprocess.run(["python3", "dashboard.py"])
+
+def run_bot():
+    subprocess.run(["python3", "bot.py"])
+
+dashboard_thread = threading.Thread(target=run_dashboard)
+bot_thread = threading.Thread(target=run_bot)
+
+dashboard_thread.start()
+bot_thread.start()
+
+dashboard_thread.join()
+bot_thread.join()
